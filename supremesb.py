@@ -2739,21 +2739,31 @@ async def main():
         print("Set TOKEN environment variable")
         return
 
-    asyncio.create_task(start_web_server())
-    
+    # 1. Start the web server FIRST
+    print("[*] Starting web server...")
+    await start_web_server()
+    print("[+] Web server is running.")
+
+    # 2. Try to start the bot, but don't let it kill the script if it fails
     main_bot = SupremeBot(token=TOKEN)
     hosted_bots.append(main_bot)
     hosted_bots_set.add(TOKEN)
     
     try:
+        print("[*] Attempting to log into Discord...")
         await main_bot.start(TOKEN)
     except discord.LoginFailure:
-        print("Invalid token. Exiting.")
+        print("[-] Invalid token provided.")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"[-] Bot crashed: {e}")
+        print("[!] Keeping web server alive to pass Render health checks...")
+        # If the bot crashes (e.g. 429 ban), keep the web server running
+        # so Render doesn't restart the service and make the ban worse.
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
-        print(f"error : {e}")
+        print(f"Critical error: {e}")
