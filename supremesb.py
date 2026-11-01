@@ -2752,6 +2752,7 @@ async def main():
     try:
         print("[*] Attempting to log into Discord...")
         await main_bot.start(TOKEN)
+        print("[+] Bot login successful!")
     except discord.LoginFailure:
         print("[-] Invalid token provided.")
     except Exception as e:
