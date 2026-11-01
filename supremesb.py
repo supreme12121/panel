@@ -17,11 +17,6 @@ from datetime import datetime
 from aiohttp import web
 from groq import Groq
 
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
-
-print("[DEBUG] Python script starting...", flush=True)
-
 
 # ========== CONFIGURATION ==========
 TOKEN = os.getenv("TOKEN") # Your main Discord user token
