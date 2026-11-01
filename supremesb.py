@@ -4,6 +4,7 @@ import asyncio
 import ast
 import contextlib
 import random
+import sys
 import os
 import re
 import aiohttp
@@ -15,6 +16,11 @@ from collections import deque
 from datetime import datetime
 from aiohttp import web
 from groq import Groq
+
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+print("[DEBUG] Python script starting...", flush=True)
 
 
 # ========== CONFIGURATION ==========
@@ -2733,33 +2739,30 @@ class SupremeBot(commands.Bot):
                 print("[Restart] Restart detected! Re-executing command...")
                 await self.execute_saved_command()
 
-# ========== MAIN ENTRY ==========
+# main entry
 async def main():
+    # Forcefully check token
     if not TOKEN:
-        print("Set TOKEN environment variable")
+        print("[CRITICAL ERROR] TOKEN is missing or empty in Render Environment Variables!", flush=True)
         return
 
-    # 1. Start the web server FIRST
-    print("[*] Starting web server...")
+    print("[DEBUG] Token found, starting web server...", flush=True)
     await start_web_server()
-    print("[+] Web server is running.")
+    print("[DEBUG] Web server is live on port " + str(os.environ.get("PORT", 8080)), flush=True)
 
-    # 2. Try to start the bot, but don't let it kill the script if it fails
     main_bot = SupremeBot(token=TOKEN)
     hosted_bots.append(main_bot)
     hosted_bots_set.add(TOKEN)
     
+    print("[DEBUG] Attempting to log into Discord...", flush=True)
     try:
-        print("[*] Attempting to log into Discord...")
         await main_bot.start(TOKEN)
-        print("[+] Bot login successful!")
+        print("[DEBUG] Bot login successful!", flush=True)
     except discord.LoginFailure:
-        print("[-] Invalid token provided.")
+        print("[CRITICAL ERROR] Invalid token provided. Check Render Environment Variables.", flush=True)
     except Exception as e:
-        print(f"[-] Bot crashed: {e}")
-        print("[!] Keeping web server alive to pass Render health checks...")
-        # If the bot crashes (e.g. 429 ban), keep the web server running
-        # so Render doesn't restart the service and make the ban worse.
+        print(f"[CRITICAL ERROR] Bot crashed: {e}", flush=True)
+        print("[DEBUG] Keeping web server alive...", flush=True)
         while True:
             await asyncio.sleep(3600)
 
@@ -2767,4 +2770,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
-        print(f"Critical error: {e}")
+        print(f"[FATAL ERROR] Script crashed completely: {e}", flush=True)
