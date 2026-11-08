@@ -725,7 +725,7 @@ class SupremeBot(commands.Bot):
             ctx.bot.reaction_emojis = []
             await ctx.send("Auto-react stopped")
         
-        # ========== STREAM (FIXED & HTTP PROOF) ==========
+        # ========== STREAM (RAW OP 3 BYPASS) ==========
         @self.command(name='stream')
         async def stream(ctx, *, text_input: str):
             try:
@@ -735,40 +735,56 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
             
-            # Format: "Title" | "Subtitle" | "App_ID" | "Car Name"
             parts = [p.strip() for p in text_input.split('|')]
             
             main_title = parts[0] if len(parts) > 0 else "4.0L Flat-Six // 9,000 RPM"
             subtitle = parts[1] if len(parts) > 1 else "525 HP • Weissach Pack • DRS Active"
-            # Default App ID that has a working GIF in it
+            # Use a public app ID that supports GIFs
             app_id = parts[2] if len(parts) > 2 else "1175619761823064137" 
             car_name = parts[3] if len(parts) > 3 else "Porsche 911 GT3 RS"
 
             async def stream_loop():
                 try:
                     while True:
-                        # Using discord.Activity with type=1 (Streaming)
-                        # This prevents the MessageToDict error
-                        activity = discord.Activity(
-                            type=discord.ActivityType.streaming,
-                            name="Twitch",
-                            url="https://twitch.tv/yourchannel",
-                            details=main_title,
-                            state=subtitle,
-                            assets={
-                                "large_image": "mp:external/your_gif_here", # Placeholder for the app's GIF
+                        # 1. Construct raw dictionary (Bypasses discord.py restrictions)
+                        activity = {
+                            "name": "Twitch",
+                            "type": 1, # 1 = Streaming
+                            "url": "https://twitch.tv/yourchannel",
+                            "details": main_title,
+                            "state": subtitle,
+                            "application_id": app_id,
+                            "assets": {
+                                "large_image": "mp:external/your_gif_here",
                                 "large_text": car_name
+                            }
+                        }
+                        
+                        # 2. Send directly to WebSocket (Like .rpc does)
+                        op3 = {
+                            "op": 3,
+                            "d": {
+                                "since": None,
+                                "activities": [activity],
+                                "status": "online",
+                                "afk": False,
                             },
-                            application_id=app_id
-                        )
-                        await ctx.bot.change_presence(activity=activity)
-                        await asyncio.sleep(15) # Refresh every 15s to keep it alive
+                        }
+                        
+                        if ctx.bot.ws:
+                            await ctx.bot.ws.send_as_json(op3)
+                            
+                        await asyncio.sleep(15)
                 except asyncio.CancelledError:
-                    await ctx.bot.change_presence(activity=None)
+                    if ctx.bot.ws:
+                        await ctx.bot.ws.send_as_json({
+                            "op": 3, 
+                            "d": {"since": None, "activities": [], "status": "online", "afk": False}
+                        })
                     raise
 
             ctx.bot.stream_task = asyncio.create_task(stream_loop())
-            await ctx.send(f"Streaming started:\n**{main_title}**\n{subtitle}\nCar: {car_name}")
+            await ctx.send(f"Streaming started:\n**{main_title}**\n{subtitle}")
 
         @self.command(name='streamend')
         async def streamend(ctx):
@@ -779,12 +795,16 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
                 ctx.bot.stream_task = None
-                await ctx.bot.change_presence(activity=None)
+                if ctx.bot.ws:
+                    await ctx.bot.ws.send_as_json({
+                        "op": 3, 
+                        "d": {"since": None, "activities": [], "status": "online", "afk": False}
+                    })
                 await ctx.send("Streaming stopped.")
             else:
                 await ctx.send("No active stream task.")
 
-        # ========== META QUEST / CUSTOM STATUS ==========
+        # ========== META (RAW OP 3 BYPASS) ==========
         @self.command(name='meta')
         async def meta(ctx, *, text_input: str):
             try:
@@ -794,34 +814,49 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
             
-            # Format: "Title" | "Subtitle" | "App_ID"
             parts = [p.strip() for p in text_input.split('|')]
             
             main_title = parts[0] if len(parts) > 0 else "$ol V2"
             subtitle = parts[1] if len(parts) > 1 else "Flipping $"
-            # Default App ID for Meta Quest vibe
             app_id = parts[2] if len(parts) > 2 else "1175619761823064137"
 
             async def meta_loop():
                 try:
                     while True:
-                        # Type 0 (Playing). If you want the exact "Playing on Meta Quest" text, 
-                        # Discord requires a verified VR app. We use a custom name to mimic it.
-                        activity = discord.Activity(
-                            type=discord.ActivityType.playing,
-                            name=main_title,
-                            details=subtitle,
-                            state="Gambling",
-                            application_id=app_id,
-                            assets={
+                        # We removed the "sync_id": "meta" because Discord patched it.
+                        # Now it will just show as Playing [Title]
+                        activity = {
+                            "name": main_title,
+                            "type": 0, # 0 = Playing
+                            "details": subtitle,
+                            "state": "Gambling",
+                            "application_id": app_id,
+                            "assets": {
                                 "large_image": "mp:external/your_gif_here",
                                 "large_text": main_title
                             }
-                        )
-                        await ctx.bot.change_presence(activity=activity)
+                        }
+                        
+                        op3 = {
+                            "op": 3,
+                            "d": {
+                                "since": None,
+                                "activities": [activity],
+                                "status": "online",
+                                "afk": False,
+                            },
+                        }
+                        
+                        if ctx.bot.ws:
+                            await ctx.bot.ws.send_as_json(op3)
+                            
                         await asyncio.sleep(15)
                 except asyncio.CancelledError:
-                    await ctx.bot.change_presence(activity=None)
+                    if ctx.bot.ws:
+                        await ctx.bot.ws.send_as_json({
+                            "op": 3, 
+                            "d": {"since": None, "activities": [], "status": "online", "afk": False}
+                        })
                     raise
 
             ctx.bot.stream_task = asyncio.create_task(meta_loop())
@@ -836,8 +871,13 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
                 ctx.bot.stream_task = None
-                await ctx.bot.change_presence(activity=None)
+                if ctx.bot.ws:
+                    await ctx.bot.ws.send_as_json({
+                        "op": 3, 
+                        "d": {"since": None, "activities": [], "status": "online", "afk": False}
+                    })
                 await ctx.send("Meta status stopped.")
+                
         @self.command(name='rpc')
         async def rpc(ctx, *, game: str):
             try:
