@@ -725,7 +725,7 @@ class SupremeBot(commands.Bot):
             ctx.bot.reaction_emojis = []
             await ctx.send("Auto-react stopped")
         
-        # ========== STREAM (RAW OP 3 BYPASS) ==========
+        # ========== STREAM (RAW WEBSOCKET FIX) ==========
         @self.command(name='stream')
         async def stream(ctx, *, text_input: str):
             try:
@@ -735,32 +735,31 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
             
+            # Format: "Title" | "Subtitle" | "Image_URL" | "Car Name"
             parts = [p.strip() for p in text_input.split('|')]
             
-            main_title = parts[0] if len(parts) > 0 else "4.0L Flat-Six // 9,000 RPM"
+            main_title = parts[0] if len(parts) > 0 else "4.0L Flat-Six - 9,000 RPM"
             subtitle = parts[1] if len(parts) > 1 else "525 HP • Weissach Pack • DRS Active"
-            # Use a public app ID that supports GIFs
-            app_id = parts[2] if len(parts) > 2 else "1175619761823064137" 
+            # Use a direct image URL (Tenor links usually work)
+            image_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/7O4yv4m7a4AAAAAj/porsche.gif"
             car_name = parts[3] if len(parts) > 3 else "Porsche 911 GT3 RS"
 
             async def stream_loop():
                 try:
                     while True:
-                        # 1. Construct raw dictionary (Bypasses discord.py restrictions)
                         activity = {
                             "name": "Twitch",
                             "type": 1, # 1 = Streaming
                             "url": "https://twitch.tv/yourchannel",
                             "details": main_title,
                             "state": subtitle,
-                            "application_id": app_id,
                             "assets": {
-                                "large_image": "mp:external/your_gif_here",
+                                "large_image": image_url, 
                                 "large_text": car_name
                             }
                         }
                         
-                        # 2. Send directly to WebSocket (Like .rpc does)
+                        # Send raw OP 3 to WebSocket (Bypasses discord.py entirely)
                         op3 = {
                             "op": 3,
                             "d": {
@@ -795,16 +794,11 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
                 ctx.bot.stream_task = None
-                if ctx.bot.ws:
-                    await ctx.bot.ws.send_as_json({
-                        "op": 3, 
-                        "d": {"since": None, "activities": [], "status": "online", "afk": False}
-                    })
                 await ctx.send("Streaming stopped.")
             else:
                 await ctx.send("No active stream task.")
 
-        # ========== META (RAW OP 3 BYPASS) ==========
+        # ========== META (RAW WEBSOCKET FIX) ==========
         @self.command(name='meta')
         async def meta(ctx, *, text_input: str):
             try:
@@ -818,21 +812,19 @@ class SupremeBot(commands.Bot):
             
             main_title = parts[0] if len(parts) > 0 else "$ol V2"
             subtitle = parts[1] if len(parts) > 1 else "Flipping $"
-            app_id = parts[2] if len(parts) > 2 else "1175619761823064137"
+            image_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/example_anime_gif.gif"
 
             async def meta_loop():
                 try:
                     while True:
-                        # We removed the "sync_id": "meta" because Discord patched it.
-                        # Now it will just show as Playing [Title]
+                        # To make it look like a VR game, we put the game in the name
                         activity = {
-                            "name": main_title,
+                            "name": f"{main_title} (Meta Quest)", 
                             "type": 0, # 0 = Playing
                             "details": subtitle,
                             "state": "Gambling",
-                            "application_id": app_id,
                             "assets": {
-                                "large_image": "mp:external/your_gif_here",
+                                "large_image": image_url,
                                 "large_text": main_title
                             }
                         }
@@ -871,11 +863,6 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
                 ctx.bot.stream_task = None
-                if ctx.bot.ws:
-                    await ctx.bot.ws.send_as_json({
-                        "op": 3, 
-                        "d": {"since": None, "activities": [], "status": "online", "afk": False}
-                    })
                 await ctx.send("Meta status stopped.")
                 
         @self.command(name='rpc')
