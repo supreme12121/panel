@@ -725,9 +725,9 @@ class SupremeBot(commands.Bot):
             ctx.bot.reaction_emojis = []
             await ctx.send("Auto-react stopped")
         
-        # ========== STREAM ==========
+        # ========== STREAM (UPGRADED) ==========
         @self.command(name='stream')
-        async def stream(ctx, *, texts: str):
+        async def stream(ctx, *, text_input: str):
             try:
                 await ctx.message.delete()
             except:
@@ -737,18 +737,39 @@ class SupremeBot(commands.Bot):
             
             ctx.bot.rpc_game = None
             ctx.bot.rpc_start_time = None
-            text_list = [t.strip() for t in texts.split(",")]
+
+            # Parse input. Format: "Main Title" | "Subtitle" | "GIF_URL" | "Car Name"
+            # If the user just provides text, it defaults to the Porsche setup.
+            parts = [p.strip() for p in text_input.split('|')]
+            
+            main_title = parts[0] if len(parts) > 0 else "4.0L Flat-Six // 9,000 RPM"
+            subtitle = parts[1] if len(parts) > 1 else "525 HP • Weissach Pack • DRS Active"
+            gif_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/7O4yv4m7a4AAAAAj/porsche.gif" # Put a valid GIF URL here
+            car_name = parts[3] if len(parts) > 3 else "Porsche 911 GT3 RS"
+
             async def stream_loop():
                 try:
                     while True:
-                        for t in text_list:
-                            await ctx.bot.change_presence(activity=discord.Streaming(name=t, url="https://twitch.tv/yourchannel"))
-                            await asyncio.sleep(10)
+                        activity = {
+                            "name": "Twitch",
+                            "type": 1, # 1 = Streaming
+                            "url": "https://twitch.tv/yourchannel",
+                            "details": main_title,
+                            "state": subtitle,
+                            "assets": {
+                                "large_image": gif_url,
+                                "large_text": car_name
+                            }
+                        }
+                        # Send raw presence update
+                        await ctx.bot.change_presence(activity=activity)
+                        await asyncio.sleep(10)
                 except asyncio.CancelledError:
                     await ctx.bot.change_presence(activity=None)
                     raise
+
             ctx.bot.stream_task = asyncio.create_task(stream_loop())
-            await ctx.send(f"Streaming started: {', '.join(text_list)}")
+            await ctx.send(f"Streaming started:\n**{main_title}**\n{subtitle}\nCar: {car_name}")
         
         @self.command(name='streamend')
         async def streamend(ctx):
@@ -765,6 +786,59 @@ class SupremeBot(commands.Bot):
                 await ctx.send("Streaming stopped")
             else:
                 await ctx.send("No active stream task")
+
+        # ========== META QUEST STATUS ==========
+        @self.command(name='meta')
+        async def meta(ctx, *, text_input: str):
+            try:
+                await ctx.message.delete()
+            except:
+                pass
+            if ctx.bot.stream_task:
+                ctx.bot.stream_task.cancel()
+            
+            # Parse input. Format: "Main Title" | "Subtitle" | "GIF_URL"
+            parts = [p.strip() for p in text_input.split('|')]
+            
+            main_title = parts[0] if len(parts) > 0 else "$ol V2"
+            subtitle = parts[1] if len(parts) > 1 else "Flipping $"
+            gif_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/example_anime_gif.gif"
+
+            async def meta_loop():
+                try:
+                    while True:
+                        activity = {
+                            "name": main_title,
+                            "type": 0, # 0 = Playing
+                            "details": subtitle,
+                            "state": "Gambling",
+                            "assets": {
+                                "large_image": gif_url,
+                            },
+                            # "meta" forces the "Playing on Meta Quest" text
+                            "sync_id": "meta", 
+                            "flags": 1 
+                        }
+                        await ctx.bot.change_presence(activity=activity)
+                        await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    await ctx.bot.change_presence(activity=None)
+                    raise
+
+            ctx.bot.stream_task = asyncio.create_task(meta_loop())
+            await ctx.send(f"Meta Quest status started:\n**{main_title}**\n{subtitle}")
+
+        @self.command(name='metaend')
+        async def metaend(ctx):
+            try:
+                await ctx.message.delete()
+            except:
+                pass
+            if ctx.bot.stream_task:
+                ctx.bot.stream_task.cancel()
+                ctx.bot.stream_task = None
+                await ctx.bot.change_presence(activity=None)
+                await ctx.send("Meta Quest status stopped.")
 
 
         @self.command(name='rpc')
@@ -2564,10 +2638,10 @@ class SupremeBot(commands.Bot):
                 (".stopautopaste", "<channel_id>", "Stop auto-paste", "green"),
                 
                 #  PAGE 7 - CYAN (Stream & Utilities)
-                (".stream", "Title1,Title2,...", "Streaming status rotation", "cyan"),
+                (".stream", "<title> | <subtitle> | <gif_url> | <car>", "Custom stream with GIF (Porsche default)", "cyan"),
                 (".streamend", "", "Stop streaming", "cyan"),
-                (".archive", "[channel_id] [limit]", "Archive channel messages", "cyan"),
-                (".upload", "<url>", "Upload file from URL", "cyan"),
+                (".meta", "<title> | <subtitle> | <gif_url>", "Meta Quest status with GIF", "cyan"),
+                (".metaend", "", "Stop Meta Quest status", "cyan"),
                 
                 #  PAGE 8 - CYAN (More Utilities)
                 (".linkgen", "<name>", "Generate random links", "cyan"),
@@ -2629,12 +2703,17 @@ class SupremeBot(commands.Bot):
                 (".channel", "<channel_id>", "Save channel for restart", "gold"),
                 (".restartclear", "", "Clear saved command and channel", "gold"),
 
-                # PAGE 18 - BLUE (Calculation, Stats & Logs)
-                (".calculate", "<expression>", "Safely calculate arithmetic", "cyan"),
-                (".stats", "", "Show active commands and bot stats", "cyan"),
-                (".logs", "[limit]", "Show the activity log dashboard", "cyan"),
+                # PAGE 18 - CYAN (Calculation, Stats & Logs)
                 (".rpc", "<game name>", "Show a playing game with elapsed time", "cyan"),
                 (".rpcstop", "", "Stop the playing game status", "cyan"),
+                (".stats", "", "Show active commands and bot stats", "cyan"),
+                (".logs", "[limit]", "Show the activity log dashboard", "cyan"),
+
+                # PAGE 19 - BLUE (UPLOAD N ARCHIVE)
+                (".calculate", "<expression>", "Safely calculate arithmetic", "cyan"),
+                (".archive", "[channel_id] [limit]", "Archive channel messages", "cyan"),
+                (".upload", "<url>", "Upload file from URL", "cyan"),
+
             ]
             
             per_page = 4
