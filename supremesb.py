@@ -725,7 +725,7 @@ class SupremeBot(commands.Bot):
             ctx.bot.reaction_emojis = []
             await ctx.send("Auto-react stopped")
         
-        # ========== STREAM (UPGRADED) ==========
+        # ========== STREAM (RAW WEBSOCKET FIX) ==========
         @self.command(name='stream')
         async def stream(ctx, *, text_input: str):
             try:
@@ -738,18 +738,18 @@ class SupremeBot(commands.Bot):
             ctx.bot.rpc_game = None
             ctx.bot.rpc_start_time = None
 
-            # Parse input. Format: "Main Title" | "Subtitle" | "GIF_URL" | "Car Name"
-            # If the user just provides text, it defaults to the Porsche setup.
+            # Format: "Title" | "Subtitle" | "GIF_URL" | "Car Name"
             parts = [p.strip() for p in text_input.split('|')]
             
             main_title = parts[0] if len(parts) > 0 else "4.0L Flat-Six // 9,000 RPM"
             subtitle = parts[1] if len(parts) > 1 else "525 HP • Weissach Pack • DRS Active"
-            gif_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/7O4yv4m7a4AAAAAj/porsche.gif" # Put a valid GIF URL here
+            gif_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/7O4yv4m7a4AAAAAj/porsche.gif"
             car_name = parts[3] if len(parts) > 3 else "Porsche 911 GT3 RS"
 
             async def stream_loop():
                 try:
                     while True:
+                        # Build the raw JSON payload
                         activity = {
                             "name": "Twitch",
                             "type": 1, # 1 = Streaming
@@ -759,18 +759,34 @@ class SupremeBot(commands.Bot):
                             "assets": {
                                 "large_image": gif_url,
                                 "large_text": car_name
-                            }
+                            },
+                            "flags": 1 # Required for some external images to render
                         }
-                        # Send raw presence update
-                        await ctx.bot.change_presence(activity=activity)
+                        
+                        # Send RAW OP 3 to WebSocket (bypasses discord.py restrictions)
+                        op3 = {
+                            "op": 3,
+                            "d": {
+                                "since": None,
+                                "activities": [activity],
+                                "status": "online",
+                                "afk": False,
+                            },
+                        }
+                        
+                        if ctx.bot.ws:
+                            await ctx.bot.ws.send_as_json(op3)
+                            
                         await asyncio.sleep(10)
                 except asyncio.CancelledError:
-                    await ctx.bot.change_presence(activity=None)
+                    # Clear status on stop
+                    if ctx.bot.ws:
+                        await ctx.bot.ws.send_as_json({"op": 3, "d": {"since": None, "activities": [], "status": "online", "afk": False}})
                     raise
 
             ctx.bot.stream_task = asyncio.create_task(stream_loop())
             await ctx.send(f"Streaming started:\n**{main_title}**\n{subtitle}\nCar: {car_name}")
-        
+
         @self.command(name='streamend')
         async def streamend(ctx):
             try:
@@ -779,15 +795,12 @@ class SupremeBot(commands.Bot):
                 pass
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await ctx.bot.stream_task
                 ctx.bot.stream_task = None
-                await ctx.bot.change_presence(activity=None)
                 await ctx.send("Streaming stopped")
             else:
                 await ctx.send("No active stream task")
 
-        # ========== META QUEST STATUS ==========
+        # ========== META QUEST (RAW WEBSOCKET FIX) ==========
         @self.command(name='meta')
         async def meta(ctx, *, text_input: str):
             try:
@@ -797,7 +810,7 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
             
-            # Parse input. Format: "Main Title" | "Subtitle" | "GIF_URL"
+            # Format: "Title" | "Subtitle" | "GIF_URL"
             parts = [p.strip() for p in text_input.split('|')]
             
             main_title = parts[0] if len(parts) > 0 else "$ol V2"
@@ -815,14 +828,28 @@ class SupremeBot(commands.Bot):
                             "assets": {
                                 "large_image": gif_url,
                             },
-                            # "meta" forces the "Playing on Meta Quest" text
-                            "sync_id": "meta", 
+                            "sync_id": "meta", # Forces the Meta Quest text
                             "flags": 1 
                         }
-                        await ctx.bot.change_presence(activity=activity)
+                        
+                        # Send RAW OP 3
+                        op3 = {
+                            "op": 3,
+                            "d": {
+                                "since": None,
+                                "activities": [activity],
+                                "status": "online",
+                                "afk": False,
+                            },
+                        }
+                        
+                        if ctx.bot.ws:
+                            await ctx.bot.ws.send_as_json(op3)
+                            
                         await asyncio.sleep(10)
                 except asyncio.CancelledError:
-                    await ctx.bot.change_presence(activity=None)
+                    if ctx.bot.ws:
+                        await ctx.bot.ws.send_as_json({"op": 3, "d": {"since": None, "activities": [], "status": "online", "afk": False}})
                     raise
 
             ctx.bot.stream_task = asyncio.create_task(meta_loop())
@@ -837,9 +864,7 @@ class SupremeBot(commands.Bot):
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
                 ctx.bot.stream_task = None
-                await ctx.bot.change_presence(activity=None)
                 await ctx.send("Meta Quest status stopped.")
-
 
         @self.command(name='rpc')
         async def rpc(ctx, *, game: str):
