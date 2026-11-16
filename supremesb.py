@@ -19,12 +19,12 @@ from groq import Groq
 
 
 # ========== CONFIGURATION ==========
-TOKEN = os.getenv("TOKEN") # Your main Discord user token
+TOKEN = os.getenv("TOKEN")
 if not TOKEN:
-    print(" TOKEN environment variable not set.")
+    print("token is not in environment variable")
     exit(1)
 
-# TOKEN = str(input("ENTER UR TOKEN: ")) # Your main Discord user token (only for localhost use)
+# groq api key for AI features (anti-afk, pack generator, etc.)
 GROQ_API_KEY = "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" # groq api key
 
 # ========== GLOBAL REGISTRY ==========
@@ -76,6 +76,73 @@ def _match_game_app_id(game_name: str) -> str | None:
             return game.get("id")
             
     return None
+
+STREAM_APP_ID = "1148228895507935232"  # Discord's default app ID for streams
+
+async def resolve_asset(token: str, image_url: str, app_id: str = STREAM_APP_ID):
+    """Resolves a raw image URL into a Discord-compatible stream asset key."""
+    if not image_url:
+        return None
+    if image_url.startswith("mp:") or not image_url.startswith("http"):
+        return image_url
+
+    # Handle Discord-hosted links first (fastest)
+    m = re.match(r'https?://(?:cdn|media)\.discordapp\.(?:com|net)/(attachments/\d+/\d+/[^?]+)', image_url)
+    discord_fallback = ("mp:" + m.group(1)) if m else None
+
+    headers = {"Authorization": token, "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"https://discord.com/api/v9/applications/{app_id}/external-assets",
+                headers=headers, json={"urls": [image_url]},
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data and data[0].get("external_asset_path"):
+                        path = data[0]["external_asset_path"]
+                        if discord_fallback:
+                            return "mp:" + path
+                        # Verify Discord can fetch non-Discord links
+                        async with session.get(f"https://images.discordapp.net/{path}") as chk:
+                            if chk.status == 200:
+                                return "mp:" + path
+                            print(f"[Stream] Discord can't fetch this image ({chk.status}). Use cdn.discordapp.com or catbox.moe.")
+                            return None
+                else:
+                    print(f"[Stream] external-assets failed: {resp.status}")
+    except Exception as e:
+        print(f"[Stream] external-assets error: {e}")
+
+    return discord_fallback
+
+async def upload_asset(client, image_url: str, fallback_channel=None):
+    """Downloads an image, uploads it to Discord, returns the mp:attachments key."""
+    cdn_pat = re.compile(r"https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)/attachments/(\d+)/(\d+)/([^?]+)")
+    try:
+        target = await client.user.create_dm()
+        if target is None:
+            target = fallback_channel
+        if target is None:
+            return None
+
+        async with aiohttp.ClientSession() as s:
+            r = await s.get(image_url)
+            if r.status != 200:
+                return None
+            data = await r.read()
+        fn = image_url.split("/")[-1].split("?")[0]
+        if not fn.lower().endswith(".gif"):
+            fn = "asset.gif"
+        sent = await target.send(file=discord.File(io.BytesIO(data), filename=fn))
+        m = cdn_pat.search(sent.attachments[0].url)
+        if not m:
+            return None
+        ch, att, fname = m.groups()
+        return f"mp:attachments/{ch}/{att}/{fname}"
+    except Exception as e:
+        print(f"[Stream] upload error: {e}")
+        return None
 
 async def health_check(request):
     return web.Response(text="Bot is alive")
@@ -382,6 +449,12 @@ class SupremeBot(commands.Bot):
             "message": message[:500],
         })
 
+    def record_command_start(self, command_name):
+        if command_name in {"stats", "logs"}:
+            return
+        self.command_counts[command_name] = self.command_counts.get(command_name, 0) + 1
+        self.add_activity_log("INFO", f"Started .{command_name}")
+
     def get_active_tasks(self):
         task_groups = {
             "auto-beef": self.aball_tasks,
@@ -413,17 +486,20 @@ class SupremeBot(commands.Bot):
 
     async def before_invoke(self, ctx):
         command_name = ctx.command.qualified_name if ctx.command else "unknown"
-        self.command_counts[command_name] = self.command_counts.get(command_name, 0) + 1
-        self.add_activity_log("INFO", f"Started .{command_name}")
+        args_str = f" {' '.join(ctx.args[2:])}" if len(ctx.args) > 2 else ""
+        self.add_activity_log("INFO", f"Started .{command_name}{args_str}")
 
     async def after_invoke(self, ctx):
         command_name = ctx.command.qualified_name if ctx.command else "unknown"
-        self.add_activity_log("INFO", f"Completed .{command_name}")
+        if command_name in {"stats", "logs"}: 
+            return
+        self.add_activity_log("SUCCESS", f"Completed .{command_name}")
 
     async def on_command_error(self, ctx, error):
         command_name = ctx.command.qualified_name if ctx.command else "unknown"
         original = getattr(error, "original", error)
-        self.add_activity_log("ERROR", f".{command_name}: {type(original).__name__}: {original}")
+        if command_name not in {"stats", "logs"}:
+            self.add_activity_log("ERROR", f".{command_name}: {type(original).__name__}: {original}")
         if isinstance(error, commands.CommandNotFound):
             return
         await ctx.send(f"Command error: {original}")
@@ -725,128 +801,130 @@ class SupremeBot(commands.Bot):
             ctx.bot.reaction_emojis = []
             await ctx.send("Auto-react stopped")
         
-        # ========== STREAM (RAW WEBSOCKET FIX) ==========
         @self.command(name='stream')
         async def stream(ctx, *, text_input: str):
-            try:
-                await ctx.message.delete()
-            except:
-                pass
+            try: await ctx.message.delete()
+            except: pass
+            
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
-            
-            # Format: "Title" | "Subtitle" | "Image_URL" | "Car Name"
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ctx.bot.stream_task
+
             parts = [p.strip() for p in text_input.split('|')]
             
-            main_title = parts[0] if len(parts) > 0 else "4.0L Flat-Six - 9,000 RPM"
-            subtitle = parts[1] if len(parts) > 1 else "525 HP • Weissach Pack • DRS Active"
-            # Use a direct image URL (Tenor links usually work)
-            image_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/7O4yv4m7a4AAAAAj/porsche.gif"
-            car_name = parts[3] if len(parts) > 3 else "Porsche 911 GT3 RS"
+            main_title = parts[0] if len(parts) > 0 else "4.0L Flat-Six // 9,000 RPM"
+            subtitle   = parts[1] if len(parts) > 1 else "525 HP • Weissach Pack"
+            gif_url    = parts[2] if len(parts) > 2 else None
+            car_name   = parts[3] if len(parts) > 3 else "Porsche 911 GT3 RS"
+
+            # 1. Resolve the image URL
+            assets = {"large_text": car_name}
+            if gif_url:
+                resolved_image = await resolve_asset(ctx.bot.http.token, gif_url)
+                if not resolved_image:
+                    resolved_image = await upload_asset(ctx.bot, gif_url, ctx.channel)
+                
+                if not resolved_image:
+                    await ctx.send(" Couldn't process that GIF. Try a direct `.gif` link from cdn.discordapp.com or catbox.moe.")
+                    return
+                    
+                assets["large_image"] = resolved_image
 
             async def stream_loop():
                 try:
                     while True:
                         activity = {
-                            "name": "Twitch",
-                            "type": 1, # 1 = Streaming
-                            "url": "https://twitch.tv/yourchannel",
-                            "details": main_title,
-                            "state": subtitle,
-                            "assets": {
-                                "large_image": image_url, 
-                                "large_text": car_name
-                            }
+                            "name": " ", # Discord ignores this for Streams
+                            "type": 1,   # 1 = Streaming
+                            "url": "https://www.twitch.tv/discord",
+                            # FIX: Discord shifts these up for Streams, so we map them accordingly
+                            "details": main_title, # Becomes the Top Bold line
+                            "state": subtitle,     # Becomes the Middle line
+                            "assets": assets       # "large_text" becomes the Bottom line
                         }
-                        
-                        # Send raw OP 3 to WebSocket (Bypasses discord.py entirely)
-                        op3 = {
-                            "op": 3,
-                            "d": {
-                                "since": None,
-                                "activities": [activity],
-                                "status": "online",
-                                "afk": False,
-                            },
-                        }
-                        
+
                         if ctx.bot.ws:
-                            await ctx.bot.ws.send_as_json(op3)
-                            
-                        await asyncio.sleep(15)
+                            await ctx.bot.ws.send_as_json({
+                                "op": 3,
+                                "d": {
+                                    "since": None,
+                                    "activities": [activity],
+                                    "status": "online",
+                                    "afk": False
+                                },
+                            })
+                        await asyncio.sleep(5)
                 except asyncio.CancelledError:
                     if ctx.bot.ws:
                         await ctx.bot.ws.send_as_json({
-                            "op": 3, 
+                            "op": 3,
                             "d": {"since": None, "activities": [], "status": "online", "afk": False}
                         })
                     raise
 
             ctx.bot.stream_task = asyncio.create_task(stream_loop())
-            await ctx.send(f"Streaming started:\n**{main_title}**\n{subtitle}")
+            await ctx.send(f" Stream started:\n**{main_title}**\n{subtitle}\n{car_name}")
 
         @self.command(name='streamend')
         async def streamend(ctx):
-            try:
-                await ctx.message.delete()
-            except:
-                pass
+            try: await ctx.message.delete()
+            except: pass
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ctx.bot.stream_task
                 ctx.bot.stream_task = None
                 await ctx.send("Streaming stopped.")
             else:
                 await ctx.send("No active stream task.")
 
-        # ========== META (RAW WEBSOCKET FIX) ==========
+        # ========== META ==========
         @self.command(name='meta')
         async def meta(ctx, *, text_input: str):
-            try:
-                await ctx.message.delete()
-            except:
-                pass
+            try: await ctx.message.delete()
+            except: pass
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
-            
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ctx.bot.stream_task
+
             parts = [p.strip() for p in text_input.split('|')]
-            
             main_title = parts[0] if len(parts) > 0 else "$ol V2"
-            subtitle = parts[1] if len(parts) > 1 else "Flipping $"
-            image_url = parts[2] if len(parts) > 2 else "https://media.tenor.com/example_anime_gif.gif"
+            subtitle   = parts[1] if len(parts) > 1 else "Flipping $"
+            raw_image  = parts[2] if len(parts) > 2 else None
+
+            if raw_image:
+                raw_image = await resolve_asset(ctx.bot.http.token, raw_image)
+                if not raw_image:
+                    await ctx.send(" Couldn't register that image URL (needs a direct public link).")
+                    return
 
             async def meta_loop():
                 try:
                     while True:
-                        # To make it look like a VR game, we put the game in the name
                         activity = {
-                            "name": f"{main_title} (Meta Quest)", 
-                            "type": 0, # 0 = Playing
+                            "name": f"{main_title} (Meta Quest)",
+                            "type": 0,
                             "details": subtitle,
                             "state": "Gambling",
-                            "assets": {
-                                "large_image": image_url,
-                                "large_text": main_title
-                            }
+                            "application_id": "1148228895507935232",
+                            "assets": {"large_text": main_title}
                         }
-                        
-                        op3 = {
-                            "op": 3,
-                            "d": {
-                                "since": None,
-                                "activities": [activity],
-                                "status": "online",
-                                "afk": False,
-                            },
-                        }
-                        
+                        if raw_image:
+                            activity["assets"]["large_image"] = raw_image
+
                         if ctx.bot.ws:
-                            await ctx.bot.ws.send_as_json(op3)
-                            
-                        await asyncio.sleep(15)
+                            await ctx.bot.ws.send_as_json({
+                                "op": 3,
+                                "d": {"since": None, "activities": [activity],
+                                      "status": "online", "afk": False},
+                            })
+                        await asyncio.sleep(5)
                 except asyncio.CancelledError:
                     if ctx.bot.ws:
                         await ctx.bot.ws.send_as_json({
-                            "op": 3, 
+                            "op": 3,
                             "d": {"since": None, "activities": [], "status": "online", "afk": False}
                         })
                     raise
@@ -856,14 +934,16 @@ class SupremeBot(commands.Bot):
 
         @self.command(name='metaend')
         async def metaend(ctx):
-            try:
-                await ctx.message.delete()
-            except:
-                pass
+            try: await ctx.message.delete()
+            except: pass
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await ctx.bot.stream_task
                 ctx.bot.stream_task = None
                 await ctx.send("Meta status stopped.")
+            else:
+                await ctx.send("No active meta task.")
                 
         @self.command(name='rpc')
         async def rpc(ctx, *, game: str):
@@ -1097,10 +1177,25 @@ class SupremeBot(commands.Bot):
         
         # ========== STAM ==========
         @self.command(name='stam')
-        async def stam(ctx, channel_id: int, delay: float, *, msg: str):
+        async def stam(ctx, channel_id: int, delay: float, *, msg: str = ""):
+            file_path = None
+            
+            # 1. Check if you attached an image/file to the .stam command message
+            if ctx.message.attachments:
+                attachment = ctx.message.attachments[0]
+                file_path = f"stam_media_{attachment.id}_{attachment.filename}"
+                await attachment.save(file_path)
+            
+            # 2. Check if the text you typed is a local file path
+            elif msg and os.path.isfile(msg):
+                file_path = msg
+                msg = "" # Clear msg since it's just a path
+            
             if channel_id not in ctx.bot.stam_msgs:
                 ctx.bot.stam_msgs[channel_id] = []
-            ctx.bot.stam_msgs[channel_id].append((delay, msg))
+            
+            # Store as a tuple: (delay, text_message, file_path)
+            ctx.bot.stam_msgs[channel_id].append((delay, msg, file_path))
             
             if f"stam_{channel_id}" not in ctx.bot.tasks:
                 async def stam_loop():
@@ -1108,18 +1203,24 @@ class SupremeBot(commands.Bot):
                         if channel_id not in ctx.bot.stam_msgs or not ctx.bot.stam_msgs[channel_id]:
                             await asyncio.sleep(5)
                             continue
-                        for d, m in ctx.bot.stam_msgs[channel_id]:
+                        for d, m, f_path in ctx.bot.stam_msgs[channel_id]:
                             try:
                                 ch = ctx.bot.get_channel(channel_id)
                                 if ch:
-                                    await ch.send(m)
-                            except:
-                                pass
+                                    if f_path and os.path.exists(f_path):
+                                        # Send the file (and text if provided)
+                                        await ch.send(content=m if m else None, file=discord.File(f_path))
+                                    elif m:
+                                        # Send text only
+                                        await ch.send(m)
+                            except Exception as e:
+                                print(f"[Stam Error] {e}")
                             await asyncio.sleep(d)
                         await asyncio.sleep(1)
                 ctx.bot.tasks[f"stam_{channel_id}"] = asyncio.create_task(stam_loop())
-            await ctx.send(f"Stam added in {channel_id}")
-        
+            
+            await ctx.send(f"Stam added in {channel_id}" + (" (with image)" if file_path else ""))
+
         @self.command(name='stamlist')
         async def stamlist(ctx, channel_id: int):
             try:
@@ -1127,11 +1228,15 @@ class SupremeBot(commands.Bot):
             except:
                 pass
             if channel_id in ctx.bot.stam_msgs:
-                msgs = "\n".join([f"{i+1}. delay={d} msg={m[:30]}" for i,(d,m) in enumerate(ctx.bot.stam_msgs[channel_id])])
-                await ctx.send(f"Stam messages in {channel_id}:\n{msgs}")
+                msgs = []
+                for i, item in enumerate(ctx.bot.stam_msgs[channel_id]):
+                    d, m, f = item
+                    media_str = f" [FILE: {os.path.basename(f)}]" if f else ""
+                    msgs.append(f"{i+1}. delay={d} msg={m[:30]}{media_str}")
+                await ctx.send(f"Stam messages in {channel_id}:\n" + "\n".join(msgs))
             else:
                 await ctx.send("No stam for that channel")
-        
+
         @self.command(name='stamremove')
         async def stamremove(ctx, channel_id: int, index: int):
             try:
@@ -1139,11 +1244,15 @@ class SupremeBot(commands.Bot):
             except:
                 pass
             if channel_id in ctx.bot.stam_msgs and 0 <= index-1 < len(ctx.bot.stam_msgs[channel_id]):
-                del ctx.bot.stam_msgs[channel_id][index-1]
+                d, m, f = ctx.bot.stam_msgs[channel_id].pop(index-1)
+                # Cleanup the temp file if it exists
+                if f and os.path.exists(f):
+                    try: os.remove(f)
+                    except: pass
                 await ctx.send(f"Removed stam entry {index}")
             else:
                 await ctx.send("Invalid index")
-        
+
         @self.command(name='stopstam')
         async def stopstam(ctx, channel_id: int):
             try:
@@ -1153,6 +1262,15 @@ class SupremeBot(commands.Bot):
             if f"stam_{channel_id}" in ctx.bot.tasks:
                 ctx.bot.tasks[f"stam_{channel_id}"].cancel()
                 del ctx.bot.tasks[f"stam_{channel_id}"]
+            
+            # Cleanup all temp files for this channel
+            if channel_id in ctx.bot.stam_msgs:
+                for item in ctx.bot.stam_msgs[channel_id]:
+                    d, m, f = item
+                    if f and os.path.exists(f):
+                        try: os.remove(f)
+                        except: pass
+                        
             ctx.bot.stam_msgs.pop(channel_id, None)
             await ctx.send(f"Stopped stam in {channel_id}")
         
@@ -2399,25 +2517,69 @@ class SupremeBot(commands.Bot):
                 await ctx.message.delete()
             except:
                 pass
-            active_tasks = ctx.bot.get_active_tasks()
+                
+            # Count active tasks correctly
+            active_tasks = []
+            
+            # 1. Dict-based tasks
+            dict_tasks = {
+                "ab": self.tasks,
+                "auto-beef": self.aball_tasks,
+                "auto-reply": self.auto_reply_tasks,
+                "spam-all": self.spamall_tasks,
+                "stam": self.stam_msgs,
+                "counting": self.count_tasks,
+                "multi-react": self.multireact_tasks,
+                "multi-stam": self.multistam_tasks,
+                "multi-count": self.multicount_tasks,
+            }
+            for name, group in dict_tasks.items():
+                count = sum(1 for t in group.values() if isinstance(t, asyncio.Task) and not t.done())
+                if count > 0:
+                    active_tasks.append(f"{name} ({count})")
+            
+            # 2. List-based tasks
+            spam_count = sum(1 for t in self.spam_tasks if isinstance(t, asyncio.Task) and not t.done())
+            if spam_count > 0:
+                active_tasks.append(f"spam ({spam_count})")
+
+            # 3. Single tasks
+            if isinstance(self.stream_task, asyncio.Task) and not self.stream_task.done():
+                active_tasks.append("stream")
+            if isinstance(self.gc_task, asyncio.Task) and not self.gc_task.done():
+                active_tasks.append("gc-name")
+            if isinstance(self.afk_task, asyncio.Task) and not self.afk_task.done():
+                active_tasks.append("anti-afk")
+                
             active_summary = ", ".join(active_tasks) if active_tasks else "None"
+            
             top_commands = sorted(
-                ctx.bot.command_counts.items(),
+                self.command_counts.items(),
                 key=lambda item: item[1],
                 reverse=True,
             )[:5]
             command_summary = (
-                "\n".join(f"`.{name}`: {count}" for name, count in top_commands)
+                "\n".join(f"`.{name}`: {count} times" for name, count in top_commands)
                 if top_commands else "No commands recorded yet."
             )
 
-            status = "Online" if ctx.bot.is_ready() else "Starting"
+            status = "Online" if self.is_ready() else "Starting"
+            total_commands = sum(self.command_counts.values())
+            
+            # Calculate uptime properly
+            uptime_seconds = int(time.time() - self.start_time)
+            hours = uptime_seconds // 3600
+            minutes = (uptime_seconds % 3600) // 60
+            seconds = uptime_seconds % 60
+            uptime_str = f"{hours}h {minutes}m {seconds}s"
+
             stats_message = (
-                "**Bot Statistics**\n"
+                "**Supreme Bot Statistics**\n"
                 f"Status: **{status}**\n"
-                f"Uptime: **{int(time.time() - ctx.bot.start_time)} seconds**\n"
-                f"Active commands: **{active_summary}**\n"
-                f"Hosted token pool: **{len(ctx.bot.token_pool)}**\n\n"
+                f"Uptime: **{uptime_str}**\n"
+                f"Active tasks: **{active_summary}**\n"
+                f"Commands handled: **{total_commands}**\n"
+                f"Hosted token pool: **{len(self.token_pool)}**\n\n"
                 f"**Recent command usage**\n{command_summary}"
             )
             await ctx.send(stats_message[:2000])
@@ -2429,21 +2591,33 @@ class SupremeBot(commands.Bot):
                 await ctx.message.delete()
             except:
                 pass
-            limit = max(1, min(limit, 15))
-            recent_logs = list(ctx.bot.activity_logs)[-limit:]
-            if recent_logs:
-                lines = [
-                    f"{entry['time']} [{entry['level']}] {entry['message']}"
-                    for entry in recent_logs
-                ]
-                activity = "\n".join(lines)
-            else:
-                activity = "No activity recorded yet."
+            
+            limit = max(1, min(limit, 20))
+            # Get the most recent logs
+            recent_logs = list(self.activity_logs)[-limit:]
+            
+            if not recent_logs:
+                await ctx.send("No activity recorded yet.")
+                return
+                
+            lines = []
+            for entry in recent_logs:
+                # Add an emoji based on the log level
+                level_icon = "🔵" # INFO
+                if entry['level'] == 'ERROR':
+                    level_icon = "🔴"
+                elif entry['level'] == 'SUCCESS':
+                    level_icon = "🟢"
+                    
+                lines.append(f"{level_icon} `[{entry['time']}]` **{entry['level']}**: {entry['message']}")
+                
+            activity = "\n".join(lines)
+            
             log_message = (
-                "**Activity Log Dashboard**\n"
-                "Recent command, task, and error activity:\n"
-                f"```text\n{activity}\n```\n"
-                f"Showing {len(recent_logs)} of {len(ctx.bot.activity_logs)} entries"
+                f"**Activity Log Dashboard** (Last {len(recent_logs)} entries)\n"
+                "```text\n"
+                f"{activity}\n"
+                "```"
             )
             await ctx.send(log_message[:2000])
         
@@ -2662,9 +2836,9 @@ class SupremeBot(commands.Bot):
                 (".stopautopaste", "<channel_id>", "Stop auto-paste", "green"),
                 
                 #  PAGE 7 - CYAN (Stream & Utilities)
-                (".stream", "<title> | <subtitle> | <gif_url> | <car>", "Custom stream with GIF (Porsche default)", "cyan"),
+                (".stream", "<title> | <subtitle> | <asset_key> | <car>", "Custom stream with Discord asset", "cyan"),
                 (".streamend", "", "Stop streaming", "cyan"),
-                (".meta", "<title> | <subtitle> | <gif_url>", "Meta Quest status with GIF", "cyan"),
+                (".meta", "<title> | <subtitle> | <asset_key>", "Meta Quest status with Discord asset", "cyan"),
                 (".metaend", "", "Stop Meta Quest status", "cyan"),
                 
                 #  PAGE 8 - CYAN (More Utilities)
