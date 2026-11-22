@@ -843,8 +843,9 @@ class SupremeBot(commands.Bot):
                             "assets": assets       
                         }
 
-                        # FIX: Check if socket is open before sending
-                        if ctx.bot.ws and not ctx.bot.ws.closed:
+                        # FIX: discord.py-self no longer uses .closed. 
+                        # We just check if ws exists, and catch the error if it's dead.
+                        if ctx.bot.ws:
                             try:
                                 await ctx.bot.ws.send_as_json({
                                     "op": 3,
@@ -859,13 +860,13 @@ class SupremeBot(commands.Bot):
                                 print(f"[Stream Error] WS send failed: {e}")
                                 break # Stop looping if WS is dead
                         else:
-                            print("[Stream Error] WebSocket is closed. Stopping loop.")
+                            print("[Stream Error] WebSocket is None. Stopping loop.")
                             break
 
                         await asyncio.sleep(5)
                 except asyncio.CancelledError:
                     # Attempt to clear status safely
-                    if ctx.bot.ws and not ctx.bot.ws.closed:
+                    if ctx.bot.ws:
                         try:
                             await ctx.bot.ws.send_as_json({
                                 "op": 3,
