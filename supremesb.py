@@ -835,32 +835,44 @@ class SupremeBot(commands.Bot):
                 try:
                     while True:
                         activity = {
-                            "name": " ", # Discord ignores this for Streams
-                            "type": 1,   # 1 = Streaming
+                            "name": " ", 
+                            "type": 1,   
                             "url": "https://www.twitch.tv/discord",
-                            # FIX: Discord shifts these up for Streams, so we map them accordingly
-                            "details": main_title, # Becomes the Top Bold line
-                            "state": subtitle,     # Becomes the Middle line
-                            "assets": assets       # "large_text" becomes the Bottom line
+                            "details": main_title, 
+                            "state": subtitle,     
+                            "assets": assets       
                         }
 
-                        if ctx.bot.ws:
-                            await ctx.bot.ws.send_as_json({
-                                "op": 3,
-                                "d": {
-                                    "since": None,
-                                    "activities": [activity],
-                                    "status": "online",
-                                    "afk": False
-                                },
-                            })
+                        # FIX: Check if socket is open before sending
+                        if ctx.bot.ws and not ctx.bot.ws.closed:
+                            try:
+                                await ctx.bot.ws.send_as_json({
+                                    "op": 3,
+                                    "d": {
+                                        "since": None,
+                                        "activities": [activity],
+                                        "status": "online",
+                                        "afk": False
+                                    },
+                                })
+                            except Exception as e:
+                                print(f"[Stream Error] WS send failed: {e}")
+                                break # Stop looping if WS is dead
+                        else:
+                            print("[Stream Error] WebSocket is closed. Stopping loop.")
+                            break
+
                         await asyncio.sleep(5)
                 except asyncio.CancelledError:
-                    if ctx.bot.ws:
-                        await ctx.bot.ws.send_as_json({
-                            "op": 3,
-                            "d": {"since": None, "activities": [], "status": "online", "afk": False}
-                        })
+                    # Attempt to clear status safely
+                    if ctx.bot.ws and not ctx.bot.ws.closed:
+                        try:
+                            await ctx.bot.ws.send_as_json({
+                                "op": 3,
+                                "d": {"since": None, "activities": [], "status": "online", "afk": False}
+                            })
+                        except:
+                            pass
                     raise
 
             ctx.bot.stream_task = asyncio.create_task(stream_loop())
@@ -870,11 +882,23 @@ class SupremeBot(commands.Bot):
         async def streamend(ctx):
             try: await ctx.message.delete()
             except: pass
+            
             if ctx.bot.stream_task:
                 ctx.bot.stream_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await ctx.bot.stream_task
                 ctx.bot.stream_task = None
+                
+                # SAFE CLEAR: Check if WS is still alive before sending the clear payload
+                if ctx.bot.ws and not ctx.bot.ws.closed:
+                    try:
+                        await ctx.bot.ws.send_as_json({
+                            "op": 3,
+                            "d": {"since": None, "activities": [], "status": "online", "afk": False}
+                        })
+                    except Exception as e:
+                        print(f"[StreamEnd Error] Could not clear status: {e}")
+                        
                 await ctx.send("Streaming stopped.")
             else:
                 await ctx.send("No active stream task.")
